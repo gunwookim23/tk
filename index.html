@@ -328,6 +328,7 @@ async function send(e){
   const box = $("msg"), text = box.value.trim();
   if(!text) return;
   box.value = ""; resize();
+  box.focus();   // 키보드 유지 (뒤로가기 누를 때만 내려감)
   try{
     const res = await post(SERVER + tp, { name: me, uid: myId, text });
     if(!res.ok) throw new Error("HTTP " + res.status);
@@ -457,6 +458,8 @@ function lockMenu(verified){
 $("enter").onclick = enter;
 $("room").addEventListener("keydown", e => { if(e.key === "Enter") enter(); });
 $("send").addEventListener("submit", send);
+// 전송 버튼을 눌러도 입력창 포커스(키보드)가 유지되게: 버튼이 포커스를 가져가지 않도록
+$("send").querySelector("button").addEventListener("mousedown", e => e.preventDefault());
 $("msg").addEventListener("input", resize);
 $("msg").addEventListener("keydown", e => {
   if(e.key === "Enter" && !e.shiftKey && !e.isComposing){ e.preventDefault(); $("send").requestSubmit(); }

@@ -143,6 +143,9 @@ let pendingRd = [];       // 아직 "1"이 붙은 내 메시지 [{t, el}]
 let others = new Set();   // 이 방의 다른 사람 uid
 let latestOther = 0, lastReadSent = 0, clearedAt = 0, openedAt = 0, unread = 0;
 let lastDay = "", lastMsg = null, saveTimer = 0;
+let subs = {};                                   // 상대 uid → 진동 방식 "pg"(점) / "pc"(내용) / "off"
+let mySub = store.get("talk_sub") || "";         // 내 ntfy 구독 방식 (🔔에서 고른 것)
+let readTimer = 0, lastReadAt = 0;
 
 /* ───────── 토픽 이름 (기존 구독과 호환되도록 그대로 유지) ───────── */
 function hash(str){
@@ -239,10 +242,13 @@ function scheduleSave(){
 }
 
 /* ───────── 읽음 신호 ───────── */
-function sendRead(){
-  if(!room || latestOther <= lastReadSent || isAway() || isLocked()) return;
-  lastReadSent = latestOther;
-  post(SERVER + tp + "-r", { type: "read", uid: myId, upTo: latestOther }).catch(() => { lastReadSent = 0; });
+function sendRead(force){
+  if(!room || isAway() || isLocked()) return;
+  if(!force && latestOther <= lastReadSent) return;
+  const wait = 3000 - (Date.now() - lastReadAt);           // 요청 제한(429) 피하려고 3초에 한 번만
+  if(wait > 0){ if(!readTimer) readTimer = setTimeout(() => { readTimer = 0; sendRead(force); }, wait); return; }
+  lastReadAt = Date.now(); lastReadSent = latestOther;
+  post(SERVER + tp + "-r", { type: "read", uid: myId, upTo: latestOther, sub: mySub || "pg" }).catch(() => { lastReadSent = 0; });
 }
 
 /* ───────── 입장 / 연결 ───────── */
@@ -257,6 +263,7 @@ function enter(){
 
   try{ msgs = JSON.parse(store.get("talk_hist_" + r) || "{}"); }catch{ msgs = {}; }
   try{ reads = JSON.parse(store.get("talk_reads_" + r) || "{}"); }catch{ reads = {}; }
+  try{ subs = JSON.parse(store.get("talk_subs_" + r) || "{}"); }catch{ subs = {}; }
   clearedAt = +(store.get("talk_clear_" + r) || 0);
   for(const k in msgs) if(msgs[k].t <= clearedAt) delete msgs[k];
   order = Object.values(msgs).sort((a, b) => a.t - b.t).slice(-MAX_KEEP);
@@ -282,6 +289,8 @@ function onEvent(ev){
     if(!m.old || m.old === myId) return;
     if(m.uid === myId && !aliases.has(m.old)){ aliases.add(m.old); store.set("talk_alias", JSON.stringify([...aliases])); }
     others.delete(m.old);
+    if(subs[m.old] && !subs[m.uid]) subs[m.uid] = subs[m.old];
+    delete subs[m.old];
     if(reads[m.old] !== undefined){
       if(!isMine(m.uid)) reads[m.uid] = Math.max(reads[m.uid] || 0, reads[m.old]);
       delete reads[m.old];
@@ -298,6 +307,7 @@ function onEvent(ev){
     const up = m.upTo || 0;
     if(isMine(m.uid)){ if(up > lastReadSent) lastReadSent = up; return; }
     others.add(m.uid);
+    if(m.sub && subs[m.uid] !== m.sub){ subs[m.uid] = m.sub; store.set("talk_subs_" + room, JSON.stringify(subs)); }
     if(up > (reads[m.uid] || 0)){
       reads[m.uid] = up; store.set("talk_reads_" + room, JSON.stringify(reads));
       if(up > readUpTo){ readUpTo = up; updateReadMarks(); }
@@ -330,17 +340,26 @@ async function send(e){
   box.value = ""; resize();
   box.focus();   // 키보드 유지 (뒤로가기 누를 때만 내려감)
   try{
-    const res = await post(SERVER + tp, { name: me, uid: myId, text });
-    if(!res.ok) throw new Error("HTTP " + res.status);
-    for(const uid of others){
-      if(isMine(uid)) continue;
-      post(SERVER, { topic: pingTopic(uid), title: "·", message: "·" }).catch(() => {});
-      post(SERVER, { topic: contentTopic(uid), title: me, message: text }).catch(() => {});
+    let res;
+    for(const delay of [0, 2000, 5000]){                    // 요청 제한(429)이면 잠깐 기다렸다 재시도
+      if(delay){ showErr("⏳ 서버가 잠시 바빠요. 다시 보내는 중…"); await new Promise(r => setTimeout(r, delay)); }
+      res = await post(SERVER + tp, { name: me, uid: myId, text });
+      if(res.status !== 429) break;
     }
-    sendRead();
+    showErr("");
+    if(res.status === 429) throw new Error("429");
+    if(!res.ok) throw new Error("HTTP " + res.status);
+    for(const uid of others){                                 // 상대가 고른 방식 하나만 (요청 수 절반)
+      if(isMine(uid)) continue;
+      const k = subs[uid] || "pg";
+      if(k === "pg") post(SERVER, { topic: pingTopic(uid), title: "·", message: "·" }).catch(() => {});
+      else if(k === "pc") post(SERVER, { topic: contentTopic(uid), title: me, message: text }).catch(() => {});
+    }
   }catch(err){
     box.value = text; resize();
-    alert("전송 실패: " + err.message + "\n인터넷 연결을 확인해 주세요.");
+    alert(err.message === "429"
+      ? "전송 실패: 무료 서버의 요청 한도에 걸렸어요.\n1~2분 뒤 다시 보내주세요. (쓴 글은 입력창에 남아 있어요)"
+      : "전송 실패: " + err.message + "\n인터넷 연결을 확인해 주세요.");
   }
 }
 function resize(){ const t = $("msg"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 120) + "px"; }
@@ -475,6 +494,7 @@ $("vib").onclick = () => {
 $("ntfy").onclick = async () => {
   const withText = confirm("워치/알림에 메시지 내용도 보이게 할까요?\n\n확인 = 이름 + 내용 표시\n취소 = 점(·)만 표시");
   const t = withText ? contentTopic(myId) : pingTopic(myId);
+  mySub = withText ? "pc" : "pg"; store.set("talk_sub", mySub); sendRead(true);
   try{ await navigator.clipboard.writeText(t); }catch{}
   prompt("ntfy 앱에서 + 를 누르고 아래 이름을 붙여넣으세요. (이미 복사됐어요)\n※ 사람마다 이름이 달라요. 각자 자기 폰에서 눌러야 해요.", t);
 };

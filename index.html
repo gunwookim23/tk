@@ -131,6 +131,9 @@ function clearUnread(){
 }
 document.addEventListener("visibilitychange", () => { if(!document.hidden){ clearUnread(); sendRead(); } });
 window.addEventListener("focus", () => { clearUnread(); sendRead(); });
+// 화면을 만지거나 입력할 때, 그리고 보고 있는 동안 몇 초마다 읽음 확인
+["pointerdown", "keydown", "scroll"].forEach(ev => document.addEventListener(ev, () => sendRead(), { passive: true, capture: true }));
+setInterval(sendRead, 4000);
 
 // ── 읽음 표시: 내가 화면을 보고 있으면 "여기까지 읽음"을 상대에게 알려요 ──
 function sendRead(){
@@ -182,7 +185,7 @@ function connect(){
   if(es) es.close();
   openedAt = Date.now();
   es = new EventSource(SERVER + topic() + "," + topic() + "-r/sse?since=all");
-  es.onopen = () => showErr("");
+  es.onopen = () => { showErr(""); setTimeout(sendRead, 800); };
   es.onmessage = ev => {
     let d; try{ d = JSON.parse(ev.data); }catch{ return; }
     if(d.event !== "message" || !d.message) return;
@@ -262,6 +265,7 @@ async function send(e){
     const res = await fetch(SERVER + topic(), { method: "POST", body: JSON.stringify({ name: me, uid: myId, text }) });
     if(!res.ok) throw new Error("HTTP " + res.status);
     ping();
+    sendRead();
   }catch(err){
     $("msg").value = text; resize();
     alert("전송 실패: " + err.message + "\n인터넷 연결을 확인해 주세요.");

@@ -17,7 +17,7 @@
   html,body{height:100%}
   body{font-family:"Malgun Gothic","Apple SD Gothic Neo",-apple-system,sans-serif;background:var(--bg);color:var(--text)}
   .hidden{display:none!important}
-  #err{position:fixed;top:0;left:0;right:0;z-index:10;background:#fde8e8;color:#9b1c1c;font-size:13px;line-height:1.5;padding:10px 16px;white-space:pre-wrap;text-align:center}
+  #err{pointer-events:none;opacity:.95;position:fixed;top:0;left:0;right:0;z-index:10;background:#fde8e8;color:#9b1c1c;font-size:13px;line-height:1.5;padding:10px 16px;white-space:pre-wrap;text-align:center}
   /* 입장 화면 */
   #join{height:100%;display:flex;align-items:center;justify-content:center;padding:16px}
   .box{background:#fff;border-radius:12px;padding:28px 22px;width:100%;max-width:360px;border:1px solid var(--line)}
@@ -48,6 +48,18 @@
   form{display:flex;gap:8px;padding:10px 12px calc(10px + env(safe-area-inset-bottom));border-top:1px solid var(--line);background:#fff}
   textarea{flex:1;resize:none;border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-size:15px;font-family:inherit;max-height:120px;background:var(--bg);color:var(--text)}
   form button{border:0;background:var(--accent);color:#fff;border-radius:8px;padding:0 16px;font-size:14px;font-weight:600;cursor:pointer}
+  /* 잠금 화면 */
+  #lock{position:fixed;inset:0;z-index:20;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px}
+  #lock h2{font-size:17px;color:var(--accent)}
+  #lock p{font-size:13px;color:var(--sub);min-height:18px}
+  #pinDots{display:flex;gap:12px}
+  #pinDots i{width:13px;height:13px;border-radius:50%;border:2px solid var(--accent)}
+  #pinDots i.on{background:var(--accent)}
+  #pad{display:grid;grid-template-columns:repeat(3,72px);gap:10px;margin-top:6px}
+  #pad button{height:56px;border:0;border-radius:12px;background:#fff;font-size:22px;color:var(--text);cursor:pointer}
+  #pad button.fn{background:none;font-size:14px;color:var(--sub)}
+  #bioBtn{border:1px solid var(--line);background:#fff;border-radius:10px;padding:10px 18px;font-size:14px;color:var(--accent);cursor:pointer}
+  #forgot{background:none;border:0;color:var(--sub);font-size:12px;text-decoration:underline;cursor:pointer;margin-top:6px}
 </style>
 </head>
 <body>
@@ -67,8 +79,10 @@
   <header>
     <div><b id="roomTitle"></b><small id="meName"></small></div>
     <div>
-      <button id="ntfy">🔔 앱</button>
+      <button id="ntfy" title="워치/진동 알림">🔔</button>
       <button id="vib"></button>
+      <button id="lockSet" title="잠금 설정">🔒</button>
+      <button id="clear" title="내 폰에서 대화 지우기">🗑</button>
       <button id="leave">나가기</button>
     </div>
   </header>
@@ -77,6 +91,15 @@
     <textarea id="msg" rows="1" placeholder="메시지 입력"></textarea>
     <button>전송</button>
   </form>
+</div>
+
+<div id="lock" class="hidden">
+  <h2 id="lockTitle">Note</h2>
+  <div id="pinDots"></div>
+  <p id="lockMsg"></p>
+  <div id="pad"></div>
+  <button id="bioBtn" class="hidden">👆 지문으로 열기</button>
+  <button id="forgot" class="hidden">비밀번호를 잊었어요</button>
 </div>
 
 <script>
@@ -97,7 +120,7 @@ let myId = store.get("talk_id") || Math.random().toString(36).slice(2,10);
 store.set("talk_id", myId);
 
 let es = null, me = "", room = "", msgs = {}, openedAt = 0, unread = 0;
-let reads = {}, lastReadSent = 0;
+let reads = {}, lastReadSent = 0, clearedAt = 0;
 
 $("nick").value = store.get("talk_nick") || "";
 $("room").value = store.get("talk_room") || "";
@@ -137,7 +160,7 @@ setInterval(sendRead, 4000);
 
 // ── 읽음 표시: 내가 화면을 보고 있으면 "여기까지 읽음"을 상대에게 알려요 ──
 function sendRead(){
-  if(!room || isAway()) return;
+  if(!room || isAway() || isLocked()) return;
   let latest = 0;
   for(const m of Object.values(msgs)) if(m.uid !== myId && m.t > latest) latest = m.t;
   if(latest <= lastReadSent) return;
@@ -154,12 +177,14 @@ function hash(str){
   for(const ch of str){ a = Math.imul(a ^ ch.charCodeAt(0), 16777619) >>> 0; b = Math.imul(b ^ ch.charCodeAt(0), 2246822519) >>> 0; }
   return a.toString(16).padStart(8,"0") + b.toString(16).padStart(8,"0");
 }
-function pingTopic(uid){ return "pg-" + hash(topic() + "|" + uid); }
-function ping(){
+function pingTopic(uid){ return "pg-" + hash(topic() + "|" + uid); }      // 점만 (내용 없음)
+function contentTopic(uid){ return "pc-" + hash(topic() + "|c|" + uid); } // 이름 + 내용
+function ping(text){
   const others = new Set([...Object.values(msgs).map(m => m.uid), ...Object.keys(reads)]);
   others.delete(myId);
   others.forEach(uid => {
     fetch(SERVER, { method: "POST", body: JSON.stringify({ topic: pingTopic(uid), title: "·", message: "·" }) }).catch(() => {});
+    fetch(SERVER, { method: "POST", body: JSON.stringify({ topic: contentTopic(uid), title: me, message: text }) }).catch(() => {});
   });
 }
 function topic(){ return PREFIX + room.replace(/[^A-Za-z0-9_-]/g, c => c.charCodeAt(0).toString(36)).slice(0,62); }
@@ -176,6 +201,8 @@ function enter(){
   try{ msgs = JSON.parse(store.get(histKey()) || "{}"); }catch{ msgs = {}; }
   try{ reads = JSON.parse(store.get("talk_reads_" + room) || "{}"); }catch{ reads = {}; }
   lastReadSent = 0;
+  clearedAt = +(store.get("talk_clear_" + room) || 0);
+  for(const k in msgs) if(msgs[k].t <= clearedAt) delete msgs[k];
   render();
   connect();
   $("msg").focus();
@@ -201,6 +228,7 @@ function connect(){
       return;
     }
     if(!m.text || msgs[d.id]) return;
+    if(d.time * 1000 <= clearedAt) return;   // 지운 시점 이전 메시지는 다시 안 불러옴
     const t = d.time * 1000;
     msgs[d.id] = { name: m.name || "?", uid: m.uid, text: m.text, t };
     save(); render();
@@ -264,7 +292,7 @@ async function send(e){
   try{
     const res = await fetch(SERVER + topic(), { method: "POST", body: JSON.stringify({ name: me, uid: myId, text }) });
     if(!res.ok) throw new Error("HTTP " + res.status);
-    ping();
+    ping(text);
     sendRead();
   }catch(err){
     $("msg").value = text; resize();
@@ -283,10 +311,11 @@ $("msg").addEventListener("keydown", e => {
 });
 // ── 진동 (팝업 없이 진동만, 켜기/끄기) ──
 let vibOn = store.get("talk_vib") !== "off";
-function showVib(){ $("vib").textContent = vibOn ? "📳 진동 켬" : "🔕 진동 끔"; }
+function showVib(){ $("vib").textContent = vibOn ? "📳" : "🔕"; $("vib").title = vibOn ? "진동 켜짐" : "진동 꺼짐"; }
 function buzz(){ if(vibOn && navigator.vibrate) try{ navigator.vibrate([150, 80, 150]); }catch{} }
 $("ntfy").onclick = async () => {
-  const t = pingTopic(myId);
+  const withText = confirm("워치/알림에 메시지 내용도 보이게 할까요?\n\n확인 = 이름 + 내용 표시\n취소 = 점(·)만 표시");
+  const t = withText ? contentTopic(myId) : pingTopic(myId);
   try{ await navigator.clipboard.writeText(t); }catch{}
   prompt("ntfy 앱에서 + 를 누르고 아래 이름을 붙여넣으세요. (이미 복사됐어요)\n※ 사람마다 이름이 달라요. 각자 자기 폰에서 눌러야 해요.", t);
 };
@@ -300,6 +329,125 @@ $("leave").onclick = () => {
   if(es) es.close(); es = null; store.del("talk_room"); showErr("");
   $("chat").classList.add("hidden"); $("join").classList.remove("hidden");
 };
+
+// ── 잠금 (PIN 비밀번호 + 지문) ──
+const LOCK_AFTER = 10 * 1000;   // 다른 앱/탭에 10초 이상 있다 돌아오면 다시 잠금
+let pinBuf = "", pinMode = "unlock", pinFirst = "", hiddenAt = 0;
+
+async function sha(str){
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,"0")).join("");
+}
+function hasPin(){ return !!store.get("talk_pin"); }
+function hasBio(){ return !!store.get("talk_bio"); }
+function bioOK(){ return !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext); }
+
+function drawDots(){
+  $("pinDots").innerHTML = "";
+  for(let i = 0; i < 4; i++){ const d = document.createElement("i"); if(i < pinBuf.length) d.className = "on"; $("pinDots").appendChild(d); }
+}
+function buildPad(){
+  const keys = ["1","2","3","4","5","6","7","8","9","취소","0","⌫"];
+  $("pad").innerHTML = "";
+  keys.forEach(k => {
+    const b = document.createElement("button"); b.textContent = k;
+    if(k === "취소" || k === "⌫") b.className = "fn";
+    b.onclick = () => pressKey(k);
+    $("pad").appendChild(b);
+  });
+}
+function showLock(mode){
+  pinMode = mode; pinBuf = ""; drawDots();
+  const titles = { unlock: "비밀번호 입력", set1: "새 비밀번호 4자리", set2: "한 번 더 입력", check: "현재 비밀번호 입력" };
+  $("lockTitle").textContent = titles[mode];
+  $("lockMsg").textContent = "";
+  const unlocking = mode === "unlock";
+  $("pad").children[9].style.visibility = unlocking ? "hidden" : "visible";
+  $("bioBtn").classList.toggle("hidden", !(unlocking && hasBio()));
+  $("forgot").classList.toggle("hidden", !unlocking);
+  $("lock").classList.remove("hidden");
+}
+function hideLock(){ $("lock").classList.add("hidden"); pinBuf = ""; }
+function isLocked(){ return !$("lock").classList.contains("hidden") && pinMode === "unlock"; }
+
+async function pressKey(k){
+  if(k === "취소"){ hideLock(); return; }
+  if(k === "⌫"){ pinBuf = pinBuf.slice(0,-1); drawDots(); return; }
+  if(pinBuf.length >= 4) return;
+  pinBuf += k; drawDots();
+  if(pinBuf.length < 4) return;
+  const entered = pinBuf;
+  await new Promise(r => setTimeout(r, 120));
+  if(pinMode === "unlock" || pinMode === "check"){
+    if(await sha("note|" + entered) === store.get("talk_pin")){
+      if(pinMode === "unlock"){ hideLock(); sendRead(); }
+      else { hideLock(); lockMenu(true); }
+    } else { pinBuf = ""; drawDots(); $("lockMsg").textContent = "비밀번호가 틀렸어요"; if(navigator.vibrate) navigator.vibrate(200); }
+  } else if(pinMode === "set1"){
+    pinFirst = entered; showLock("set2");
+  } else if(pinMode === "set2"){
+    if(entered === pinFirst){
+      store.set("talk_pin", await sha("note|" + entered)); hideLock();
+      if(bioOK() && confirm("비밀번호를 설정했어요.\n지문으로도 열 수 있게 할까요?")) setupBio();
+    } else { showLock("set1"); $("lockMsg").textContent = "두 번 입력한 게 달라요. 다시 정해주세요"; }
+  }
+}
+
+// 지문: 이 기기의 지문/화면잠금으로만 확인하는 방식 (서버로 아무것도 안 보냄)
+async function setupBio(){
+  try{
+    const cred = await navigator.credentials.create({ publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      rp: { name: "Note" },
+      user: { id: crypto.getRandomValues(new Uint8Array(16)), name: "note", displayName: "Note" },
+      pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+      authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required", residentKey: "discouraged" },
+      timeout: 60000
+    }});
+    store.set("talk_bio", btoa(String.fromCharCode(...new Uint8Array(cred.rawId))));
+    alert("지문 등록 완료! 다음부터 지문으로 열 수 있어요.");
+  }catch(e){ alert("지문 등록이 취소됐거나 이 기기에서 지원하지 않아요."); }
+}
+async function unlockBio(){
+  try{
+    const id = Uint8Array.from(atob(store.get("talk_bio")), c => c.charCodeAt(0));
+    await navigator.credentials.get({ publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      allowCredentials: [{ type: "public-key", id }],
+      userVerification: "required", timeout: 60000
+    }});
+    hideLock(); sendRead();
+  }catch(e){ $("lockMsg").textContent = "지문 확인이 안 됐어요. 비밀번호를 입력해 주세요"; }
+}
+
+function lockMenu(verified){
+  if(!hasPin()){ showLock("set1"); return; }
+  if(!verified){ showLock("check"); return; }
+  const c = prompt("잠금 설정\n1 = 비밀번호 바꾸기\n2 = " + (hasBio() ? "지문 끄기" : "지문 켜기") + "\n3 = 잠금 끄기", "");
+  if(c === "1") showLock("set1");
+  else if(c === "2"){ if(hasBio()){ store.del("talk_bio"); alert("지문을 껐어요."); } else if(bioOK()) setupBio(); else alert("이 기기/브라우저에서는 지문을 쓸 수 없어요."); }
+  else if(c === "3"){ store.del("talk_pin"); store.del("talk_bio"); alert("잠금을 껐어요."); }
+}
+
+$("lockSet").onclick = () => lockMenu(false);
+$("clear").onclick = () => {
+  if(!confirm("이 폰에서 대화를 모두 지울까요?\n상대 폰에는 그대로 남아요.")) return;
+  clearedAt = Date.now();
+  store.set("talk_clear_" + room, String(clearedAt));
+  msgs = {}; save(); render();
+};
+$("bioBtn").onclick = unlockBio;
+$("forgot").onclick = () => {
+  if(!confirm("잠금을 초기화할까요?\n보안을 위해 이 기기에 저장된 대화 기록도 함께 지워져요.\n(서버에 남은 최근 대화는 다시 불러와져요)")) return;
+  Object.keys(localStorage).filter(k => k.startsWith("talk_hist_") || k === "talk_pin" || k === "talk_bio").forEach(k => store.del(k));
+  location.reload();
+};
+document.addEventListener("visibilitychange", () => {
+  if(document.hidden) hiddenAt = Date.now();
+  else if(hasPin() && hiddenAt && Date.now() - hiddenAt > LOCK_AFTER && !isLocked()){ showLock("unlock"); if(hasBio()) unlockBio(); }
+});
+buildPad();
+if(hasPin()) showLock("unlock");
 
 // 창을 닫았다 열어도 같은 방으로 자동 입장
 if(store.get("talk_nick") && store.get("talk_room")) enter();
